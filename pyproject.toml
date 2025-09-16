@@ -1,0 +1,20 @@
+[project]
+name = "image-search"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "clip-client>=0.8.3",
+    "clip-server>=0.8.3",
+    "faiss-cpu>=1.7.4",
+    "fastapi>=0.116.1",
+    "pillow>=11.3.0",
+    "python-multipart>=0.0.20",
+    "uvicorn>=0.23.1",
+]
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple"
+name = "aliyun"
+default = true

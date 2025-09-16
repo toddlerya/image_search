@@ -8,29 +8,23 @@ import uuid
 from PIL import Image
 import io
 
-# 初始化FastAPI应用
 app = FastAPI(title="多模态检索API服务")
 
-# 初始化CLIP客户端连接到本地CLIP服务
-# 增加超时设置，确保有足够时间处理请求
-clip_client = Client("grpc://0.0.0.0:51000", timeout=30)
+# 初始化CLIP客户端，增加重试机制
+clip_client = Client("grpc://0.0.0.0:51000", timeout=30, max_retries=3)
 
-# 向量维度 - CLIP ViT-B/32模型的输出维度是512
 VECTOR_DIM = 512
+index = faiss.IndexFlatIP(VECTOR_DIM)  # 改用内积计算（更适合归一化向量）
 
-# 初始化FAISS索引
-index = faiss.IndexFlatL2(VECTOR_DIM)  # 使用L2距离
-
-# 存储图片ID到路径的映射
 image_metadata = {}
 UPLOAD_FOLDER = "uploaded_images"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)  # 自动创建上传文件夹
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
 @app.post("/images/add", summary="添加图片到向量库")
 async def add_image_to_vector_db(file: UploadFile = File(...)):
     try:
-        # 保存上传的图片到本地
+        # 保存图片
         image_id = str(uuid.uuid4())
         image_ext = file.filename.split(".")[-1].lower()
         image_path = os.path.join(UPLOAD_FOLDER, f"{image_id}.{image_ext}")
@@ -38,19 +32,22 @@ async def add_image_to_vector_db(file: UploadFile = File(...)):
         with open(image_path, "wb") as f:
             f.write(await file.read())
 
-        # 编码图片 - 增加验证确保获取到向量
+        # 编码图片并归一化
         image_embedding = clip_client.encode([image_path])
         if image_embedding is None or len(image_embedding) == 0:
             raise ValueError("CLIP服务未能生成有效的图片向量")
 
-        # 存储图片元数据
+        # 归一化向量（对相似度计算很重要）
+        image_embedding = image_embedding / np.linalg.norm(image_embedding, axis=1, keepdims=True)
+
+        # 存储元数据
         image_metadata[image_id] = {
             "filename": file.filename,
             "content_type": file.content_type,
             "local_path": image_path
         }
 
-        # 将向量添加到FAISS索引
+        # 添加到索引
         index.add(np.array(image_embedding).astype("float32"))
 
         return {
@@ -66,20 +63,25 @@ async def add_image_to_vector_db(file: UploadFile = File(...)):
 @app.get("/images/search", summary="根据文本搜索相似图片")
 async def search_images_by_text(text: str, top_k: int = 5):
     try:
-        # 编码文本
-        text_embedding = clip_client.encode([text])
+        # 对中文查询进行优化，同时提供中英文提示
+        enhanced_text = f"{text} 英语: {' '.join(text.split())}"  # 简单增强
+
+        # 编码文本并归一化
+        text_embedding = clip_client.encode([enhanced_text])
         if text_embedding is None or len(text_embedding) == 0:
             raise ValueError("CLIP服务未能生成有效的文本向量")
 
-        # 检查向量库是否有数据
+        # 归一化向量
+        text_embedding = text_embedding / np.linalg.norm(text_embedding, axis=1, keepdims=True)
+
         if index.ntotal == 0:
             raise HTTPException(status_code=400, detail="向量库为空，请先添加图片")
 
-        # 搜索相似向量
+        # 搜索相似向量（内积越大越相似）
         top_k = min(top_k, index.ntotal)
-        distances, indices = index.search(np.array(text_embedding).astype("float32"), top_k)
+        similarities, indices = index.search(np.array(text_embedding).astype("float32"), top_k)
 
-        # 匹配索引与图片元数据
+        # 匹配结果
         results = []
         image_ids = list(image_metadata.keys())
         for i, idx in enumerate(indices[0]):
@@ -88,13 +90,17 @@ async def search_images_by_text(text: str, top_k: int = 5):
                 results.append({
                     "image_id": img_id,
                     "filename": image_metadata[img_id]["filename"],
-                    "similarity_score": float(1 / (1 + distances[0][i])),
+                    "similarity_score": float(similarities[0][i]),  # 直接使用内积作为相似度
                     "rank": i + 1
                 })
+
+        # 按相似度重新排序（确保正确的顺序）
+        results.sort(key=lambda x: x["similarity_score"], reverse=True)
 
         return {
             "status": "success",
             "query_text": text,
+            "enhanced_query": enhanced_text,
             "results_count": len(results),
             "results": results
         }
@@ -102,18 +108,17 @@ async def search_images_by_text(text: str, top_k: int = 5):
         raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
 
 
+# 其他接口保持不变...
 @app.post("/images/tag", summary="为图片智能打标签")
 async def auto_tag_image(
     file: UploadFile = File(...),
-    candidate_tags: str = Form(None)  # 使用Form接收标签列表
+    candidate_tags: str = Form(None)
 ):
+    # 保持原有实现...
     try:
-        # 处理候选标签 - 支持逗号分隔的字符串
         if candidate_tags:
-            # 分割并清理标签
             candidate_tags = [tag.strip() for tag in candidate_tags.split(',') if tag.strip()]
 
-        # 默认候选标签集
         if not candidate_tags:
             candidate_tags = [
                 "nature", "people", "city", "animal", "food",
@@ -121,19 +126,16 @@ async def auto_tag_image(
                 "outdoor", "night", "day", "sunny", "rainy"
             ]
 
-        # 保存临时图片
         temp_image_path = os.path.join(UPLOAD_FOLDER, f"temp_{uuid.uuid4()}.jpg")
         with open(temp_image_path, "wb") as f:
             f.write(await file.read())
 
-        # 验证图片文件是否有效
         try:
             with Image.open(temp_image_path) as img:
-                img.verify()  # 验证图片完整性
+                img.verify()
         except Exception as e:
             raise ValueError(f"无效的图片文件: {str(e)}")
 
-        # 编码图片和候选标签 - 增加验证
         image_embedding = clip_client.encode([temp_image_path])
         if image_embedding is None or len(image_embedding) == 0:
             raise ValueError("CLIP服务未能生成有效的图片向量")
@@ -142,10 +144,7 @@ async def auto_tag_image(
         if tag_embeddings is None or len(tag_embeddings) == 0:
             raise ValueError("CLIP服务未能生成有效的标签向量")
 
-        # 计算相似度
         similarities = np.dot(image_embedding, np.transpose(tag_embeddings)).flatten()
-
-        # 按相似度排序
         top_indices = similarities.argsort()[-5:][::-1]
         top_tags = [
             {
@@ -155,7 +154,6 @@ async def auto_tag_image(
             for i in top_indices
         ]
 
-        # 清理临时文件
         if os.path.exists(temp_image_path):
             os.remove(temp_image_path)
 

@@ -3,15 +3,23 @@ name = "image-search"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = "==3.11.13"
 dependencies = [
-    "clip-client>=0.8.3",
-    "clip-server>=0.8.3",
+    # 显式锁定jina版本，避免自动升级到不兼容版
+    "jina==3.28.0",
+    # 原依赖保留
     "faiss-cpu>=1.7.4",
     "fastapi>=0.116.1",
     "pillow>=11.3.0",
     "python-multipart>=0.0.20",
     "uvicorn>=0.23.1",
+    # PyTorch（与clip-server 0.8.3兼容的稳定版本）
+    "torch==2.2.0",
+    "torchvision==0.17.0",
+    # pip3 install "torch==2.2.0+cpu" "torchvision==0.17.0+cpu" -i https://mirrors.aliyun.com/pypi/simple/
+    "numpy==1.26.4",
+    "clip-client==0.8.3",
+    "clip-server>=0.8.3",
 ]
 
 [[tool.uv.index]]
